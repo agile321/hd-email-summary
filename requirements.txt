@@ -1,0 +1,6 @@
+flask
+gunicorn
+python-dotenv
+google-genai
+anthropic
+pydantic
