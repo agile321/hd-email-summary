@@ -28,18 +28,28 @@ class TradeRow(BaseModel):
                     "Infer from the email date header (e.g. 'May 14') using the current year. "
                     "If completely unavailable, use today's date."
     )
+    trade_time: str = Field(
+        description="The time of the trade in 12-hour format with AM/PM (e.g. '1:27 PM'). "
+                    "Extract from phrases like 'at 1:27 PM EST' or '10:30am'. "
+                    "Use empty string if not explicitly stated in the email."
+    )
     portfolio: str = Field(
         description="The portfolio name: 'Berserker' or 'Huginn'. "
                     "Detect from subject line or body keywords: "
-                    "'BERSERKER' / '200k port' / '200K port' → Berserker. "
+                    "'BERSERKER' / '200k port' / '200K port' / '230k port' → Berserker. "
                     "'HUGINN' / '50k port' / '50K port' → Huginn."
     )
     symbol: str = Field(description="The stock or ETF ticker symbol (e.g. 'CORZ', 'USAC').")
-    action: str = Field(description="BUY or SELL")
+    action: str = Field(
+        description="The type of trade action — must be one of: BUY, TRIM, or CLOSE. "
+                    "BUY: 'Added', 'bought', 'adding', 'building', 'started', 'initiated'. "
+                    "TRIM: 'Trimmed', 'trim', 'partial sell', 'reduced', 'cutting'. "
+                    "CLOSE: 'Closed', 'sold', 'exited', 'removed', 'flat', 'out of', 'sold out'."
+    )
     allocation_pct: float = Field(
         description="The percentage of the portfolio allocated to this trade "
                     "(e.g. '1% Added' → 1.0, '2% position' → 2.0). "
-                    "Use 0.0 for SELL signals where no new allocation is stated."
+                    "Use 0.0 for TRIM/CLOSE signals where no new allocation is stated."
     )
     avg_fill: float = Field(
         description="The average fill price from the 'Average Fill: X.XX' line. "
@@ -184,9 +194,15 @@ Rules for portfolio:
 - A MULTI TRADE email may contain trades from BOTH portfolios — assign each trade the correct portfolio.
 - Default to "Huginn" if unclear.
 
-Rules for action:
-- "Added", "bought", "added to" → BUY
-- "Trimmed", "sold", "removed" → SELL
+Rules for action (use EXACTLY one of: BUY, TRIM, CLOSE):
+- "Added", "bought", "adding", "building", "started", "initiated" → BUY
+- "Trimmed", "trim", "partial sell", "reduced", "cutting" → TRIM
+- "Closed", "sold", "exited", "removed", "flat", "out of", "sold out" → CLOSE
+
+Rules for trade_time:
+- Extract from phrases like "at 1:27 PM EST", "10:30am", "2:15 PM"
+- Format as 12-hour time with AM/PM (e.g. "1:27 PM", "10:30 AM")
+- Use empty string "" if no time is mentioned
 
 Rules for allocation_pct:
 - Extract the percentage from phrases like "CORZ 1% Added" → allocation_pct = 1.0
