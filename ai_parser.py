@@ -47,9 +47,12 @@ class TradeRow(BaseModel):
                     "CLOSE: 'Closed', 'sold', 'exited', 'removed', 'flat', 'out of', 'sold out'."
     )
     allocation_pct: float = Field(
-        description="The percentage of the portfolio allocated to this trade "
-                    "(e.g. '1% Added' → 1.0, '2% position' → 2.0). "
-                    "Use 0.0 for TRIM/CLOSE signals where no new allocation is stated."
+        description="The INCREMENTAL percentage added/trimmed in this specific trade — "
+                    "NOT the resulting total position size. "
+                    "Example: 'UPRO 5% added to 50K Port ... Previously a 55% position is now a 60% position' "
+                    "→ allocation_pct = 5.0 (the add amount), NOT 60.0 (the new total). "
+                    "Look for the explicit % stated next to the ticker or action verb. "
+                    "Use 0.0 for TRIM/CLOSE signals where no incremental % is stated."
     )
     avg_fill: float = Field(
         description="The average fill price from the 'Average Fill: X.XX' line. "
@@ -205,8 +208,9 @@ Rules for trade_time:
 - Use empty string "" if no time is mentioned
 
 Rules for allocation_pct:
-- Extract the percentage from phrases like "CORZ 1% Added" → allocation_pct = 1.0
-- For BUY signals, this is the new portfolio allocation %.
+- Extract the INCREMENTAL percentage stated next to the ticker or action verb — NOT the resulting total position size.
+- Example: "UPRO 5% added to 50K Port ... Previously a 55% position is now a 60% position" → allocation_pct = 5.0 (the 5% that was added), NOT 60.0 (the resulting total).
+- Example: "CORZ 1% Added" → allocation_pct = 1.0
 - For SELL signals with no explicit % stated, use 0.0.
 
 Rules for avg_fill:

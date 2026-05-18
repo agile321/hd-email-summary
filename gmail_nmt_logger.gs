@@ -6,7 +6,7 @@
  * POSTs raw email to Railway for AI parsing, then writes parsed
  * trades directly to Google Sheets — no credentials needed.
  *
- * Columns written: Date | Time | Ticker | Action | Direction | Capital % | Price
+ * Columns written: Date | Time | Portfolio | Ticker | Action | Direction | Capital % | Price
  *
  * Action logic:
  *   - BUY   = first entry for this ticker (no prior open position in sheet)
@@ -45,7 +45,7 @@ var GMAIL_QUERY = [
 var PROCESSED_LABEL_NAME = "NMT/Logged";
 
 // Column headers — matches the friend's trade log format
-var HEADERS = ["Date", "Time", "Ticker", "Action", "Direction", "Capital %", "Price"];
+var HEADERS = ["Date", "Time", "Portfolio", "Ticker", "Action", "Direction", "Capital %", "Price"];
 
 // ─── HEDGE ETF LIST ───────────────────────────────────────────────────────────
 // Confirmed NMT hedges: QID, SDS, TWM, UVIX, SPXS, DXD
@@ -80,7 +80,21 @@ var HEDGE_ETFS = [
 ];
 
 
-// ─── MAIN ─────────────────────────────────────────────────────────────────────
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+
+/**
+ * Safely parse a JSON string. Returns null if the response is not valid JSON
+ * (e.g. Railway returns an HTML error page on cold start / 502).
+ */
+function safeParseJSON(text) {
+  try {
+    return JSON.parse(text);
+  } catch(e) {
+    Logger.log("Could not parse response as JSON (Railway may be cold-starting): " + text.substring(0, 120));
+    return null;
+  }
+}
+
 
 function processNMTEmails() {
   var threads = GmailApp.search(GMAIL_QUERY);
@@ -116,12 +130,10 @@ function processNMTEmails() {
         });
 
         var code   = response.getResponseCode();
-        var result = JSON.parse(response.getContentText());
+        var result = safeParseJSON(response.getContentText());
 
-        Logger.log("Railway response (" + code + "): " + JSON.stringify(result));
-
-        if (code !== 200 || !result.ok) {
-          Logger.log("Non-success response — leaving email unread for retry.");
+        if (!result) {
+          Logger.log("Invalid response from Railway (HTML/empty) — leaving email unread for retry.");
           return;
         }
 
@@ -167,6 +179,7 @@ function appendTradesToSheet(trades, emailTime) {
 
   var rows = trades.map(function(t) {
     var symbol    = (t.symbol || "").toUpperCase();
+    var portfolio = t.portfolio || "Huginn";
     var rawAction = (t.action || "BUY").toUpperCase();
     var time      = (t.trade_time && t.trade_time.trim() !== "") ? t.trade_time : emailTime;
 
@@ -175,18 +188,20 @@ function appendTradesToSheet(trades, emailTime) {
 
     // Update existingData in-memory so subsequent trades in same email
     // correctly detect each other (e.g. two new BUYs in one multi-trade email)
+    // NOTE: column layout is now 8 wide — Date, Time, Portfolio, Ticker, Action, Direction, Capital%, Price
     if (action === "BUY" || action === "ADD") {
-      existingData.push([t.trade_date, time, symbol, action, direction, t.allocation_pct, t.avg_fill]);
+      existingData.push([t.trade_date, time, portfolio, symbol, action, direction, t.allocation_pct, t.avg_fill]);
     }
 
     return [
       t.trade_date     || "",   // A: Date
       time,                      // B: Time
-      symbol,                    // C: Ticker
-      action,                    // D: Action (BUY / ADD / TRIM / CLOSE)
-      direction,                 // E: Direction (LONG / HEDGE)
-      t.allocation_pct || 0,    // F: Capital %
-      t.avg_fill       || 0     // G: Price
+      portfolio,                 // C: Portfolio (Berserker / Huginn)
+      symbol,                    // D: Ticker
+      action,                    // E: Action (BUY / ADD / TRIM / CLOSE)
+      direction,                 // F: Direction (LONG / HEDGE)
+      t.allocation_pct || 0,    // G: Capital %
+      t.avg_fill       || 0     // H: Price
     ];
   });
 
@@ -217,8 +232,8 @@ function resolveAction(existingData, symbol, rawAction) {
   // Scan existing rows (skip header row at index 0)
   var hasOpenPosition = false;
   for (var i = 1; i < existingData.length; i++) {
-    var rowTicker = (existingData[i][2] || "").toString().toUpperCase();
-    var rowAction = (existingData[i][3] || "").toString().toUpperCase();
+    var rowTicker = (existingData[i][3] || "").toString().toUpperCase();  // col D (index 3) after Portfolio inserted at C
+    var rowAction = (existingData[i][4] || "").toString().toUpperCase();   // col E (index 4)
 
     if (rowTicker === symbol) {
       if (rowAction === "BUY" || rowAction === "ADD") {
@@ -353,7 +368,7 @@ function testWithSampleEmail() {
   });
 
   var code   = response.getResponseCode();
-  var result = JSON.parse(response.getContentText());
+  var result = safeParseJSON(response.getContentText());
   Logger.log("Test response (" + code + "): " + JSON.stringify(result));
 
   if (code === 200 && result.trades && result.trades.length > 0) {
@@ -363,4 +378,102 @@ function testWithSampleEmail() {
   } else {
     Logger.log("Test: no trades returned or error.");
   }
+}
+
+
+// ─── BACKFILL ─────────────────────────────────────────────────────────────────
+
+/**
+ * ONE-TIME backfill: processes all NMT trade emails from the last N days.
+ * Handles both read AND unread emails.
+ * Skips threads already tagged NMT/Logged (no duplicates).
+ *
+ * Run ONCE from the Apps Script editor to seed historical trades.
+ * The live trigger (processNMTEmails) handles new emails going forward.
+ */
+function backfillLast5Days() {
+  backfillLastNDays(5);
+}
+
+function backfillLast10Days() {
+  backfillLastNDays(10);
+}
+
+function backfillLastNDays(n) {
+  var days = n || 5;
+
+  var query = [
+    '(from:norseman@substack.com OR from:norsemanmarkettiming@substack.com)',
+    'subject:("Trade Alert" OR "TRADE ALERT" OR "MULTI TRADE")',
+    'newer_than:' + days + 'd'
+  ].join(' ');
+
+  Logger.log("Backfill query: " + query);
+  var threads = GmailApp.search(query);
+  Logger.log("Found " + threads.length + " thread(s) to backfill.");
+
+  if (threads.length === 0) {
+    Logger.log("No NMT emails found in the last " + days + " days.");
+    return;
+  }
+
+  var processedLabel = getOrCreateLabel(PROCESSED_LABEL_NAME);
+  var totalLogged = 0;
+  var totalSkipped = 0;
+
+  threads.forEach(function(thread) {
+    // Skip threads already labeled NMT/Logged
+    var threadLabels = thread.getLabels().map(function(l) { return l.getName(); });
+    if (threadLabels.indexOf(PROCESSED_LABEL_NAME) !== -1) {
+      Logger.log("Skipping already-processed: " + thread.getFirstMessageSubject());
+      totalSkipped++;
+      return;
+    }
+
+    thread.getMessages().forEach(function(msg) {
+      var subject   = msg.getSubject();
+      var body      = msg.getPlainBody();
+      var msgDate   = msg.getDate();
+      var isoDate   = Utilities.formatDate(msgDate, "UTC", "yyyy-MM-dd");
+      var emailTime = Utilities.formatDate(msgDate, "America/New_York", "h:mm a");
+
+      Logger.log("Backfilling: " + subject + " (" + isoDate + ")");
+
+      var payload = JSON.stringify({ subject: subject, body: body, date: isoDate });
+
+      try {
+        var response = UrlFetchApp.fetch(TARGET_URL, {
+          method:             "post",
+          contentType:        "application/json",
+          payload:            payload,
+          muteHttpExceptions: true
+        });
+
+        var code   = response.getResponseCode();
+        var result = safeParseJSON(response.getContentText());
+
+        if (!result) {
+          Logger.log("Invalid response from Railway — skipping: " + subject);
+          return;
+        }
+
+        var trades = result.trades || [];
+        if (trades.length > 0) {
+          appendTradesToSheet(trades, emailTime);
+          totalLogged += trades.length;
+          Logger.log("Logged " + trades.length + " trade(s) from: " + subject);
+        } else {
+          Logger.log("No trades found in: " + subject);
+        }
+
+        // Mark processed so live trigger won't re-process
+        if (processedLabel) thread.addLabel(processedLabel);
+
+      } catch(e) {
+        Logger.log("Error processing: " + subject + " — " + e);
+      }
+    });
+  });
+
+  Logger.log("=== Backfill complete: " + totalLogged + " trade(s) logged, " + totalSkipped + " skipped. ===");
 }
