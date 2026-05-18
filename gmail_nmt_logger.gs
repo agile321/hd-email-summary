@@ -2,9 +2,16 @@
  * NMT Trade Log - Google Apps Script
  * HD-Email-Summary Project
  *
- * Polls Gmail every 1 minute for unread NMT trade alert emails.
+ * Polls Gmail every 1 minute for new NMT trade alert emails.
  * POSTs raw email to Railway for AI parsing, then writes parsed
  * trades directly to Google Sheets — no credentials needed.
+ *
+ * ── DUAL-PIPELINE SAFE ──────────────────────────────────────────────────────
+ * orbital-blazar also reads these same NMT emails for trade execution.
+ * It uses is:unread as its gate and calls markRead() after processing.
+ * THIS script must NEVER call markRead() or use is:unread — instead we
+ * gate on our own label (NMT/Logged) so both pipelines are fully independent.
+ * ─────────────────────────────────────────────────────────────────────────────
  *
  * Columns written: Date | Time | Portfolio | Ticker | Action | Direction | Capital % | Price
  *
@@ -34,10 +41,14 @@ var SHEET_ID = "12Ksh7ISHq3hVT5KjaAWVQwsl49xlXnfplCxiKcRiQiE";
 // Tab name inside the spreadsheet
 var SHEET_TAB = "Trade Log";
 
-// Gmail query — same NMT senders as orbital-blazar
+// Gmail query — uses label-based gate instead of is:unread.
+// IMPORTANT: do NOT add 'is:unread' here. orbital-blazar relies on unread
+// status and calls markRead() after it processes each email. If we query
+// is:unread and one script runs first, the other misses the email entirely.
+// By gating on -label:NMT/Logged we are fully independent of orbital-blazar.
 var GMAIL_QUERY = [
   '(from:norseman@substack.com OR from:norsemanmarkettiming@substack.com)',
-  'is:unread',
+  '-label:' + 'NMT/Logged',
   'subject:("Trade Alert" OR "TRADE ALERT" OR "MULTI TRADE")'
 ].join(' ');
 
@@ -139,8 +150,9 @@ function processNMTEmails() {
 
         var trades = result.trades || [];
         if (trades.length === 0) {
-          Logger.log("No trades extracted — marking read to avoid reprocessing.");
-          msg.markRead();
+          Logger.log("No trades extracted — labeling to avoid reprocessing.");
+          // Still label so we don't re-hit this email next minute.
+          // Do NOT markRead() — orbital-blazar needs unread status intact.
           if (processedLabel) thread.addLabel(processedLabel);
           return;
         }
@@ -148,7 +160,9 @@ function processNMTEmails() {
         // Write trades to Google Sheet natively (no credentials needed)
         appendTradesToSheet(trades, emailTime);
 
-        msg.markRead();
+        // DO NOT call msg.markRead() — orbital-blazar uses is:unread as its
+        // gate. Marking read here would prevent orbital-blazar from seeing
+        // the email. We apply our own label instead (NMT/Logged).
         if (processedLabel) thread.addLabel(processedLabel);
         Logger.log("Logged " + trades.length + " trade(s) from: " + subject);
 
